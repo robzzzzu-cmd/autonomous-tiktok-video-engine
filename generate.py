@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.parse
 import wave
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -527,6 +528,25 @@ def generate_image_procedural(scene: SceneStoryboard, recipe_title: str, output_
     img.save(output_path, "PNG")
     log("VISUAL-PROCEDURAL", f"Procedural aesthetic card saved to {output_path}")
 
+def generate_image_pollinations_flux(prompt: str, output_path: str) -> bool:
+    """Fetches high-res Flux portrait visual via Pollinations AI (free FLUX endpoint)."""
+    log("VISUAL-POLLINATIONS", "Requesting Flux visual from Pollinations...")
+    clean_prompt = urllib.parse.quote(prompt[:320])
+    url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=768&height=1344&model=flux&nologo=true&seed=42"
+    try:
+        resp = requests.get(url, timeout=40)
+        if resp.status_code == 200 and resp.content:
+            img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+            img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+            img.save(output_path, "PNG", quality=95)
+            log("VISUAL-POLLINATIONS", f"Successfully generated Pollinations Flux image: {output_path}")
+            return True
+        else:
+            log("VISUAL-POLLINATIONS", f"Pollinations returned HTTP status {resp.status_code}")
+    except Exception as e:
+        log("VISUAL-POLLINATIONS", f"Pollinations generation failed ({e})")
+    return False
+
 def generate_scene_visual(
     scene: SceneStoryboard,
     recipe_title: str,
@@ -534,17 +554,21 @@ def generate_scene_visual(
     hf_token: str,
     pexels_key: str
 ) -> str:
-    """Executes visual generation waterfall: FLUX.1-schnell -> Pexels -> Procedural."""
-    # Step 1: Flux.1-Schnell
+    """Executes visual generation waterfall: FLUX.1-schnell -> Pollinations Flux -> Pexels -> Procedural."""
+    # Step 1: Hugging Face Flux.1-Schnell
     if hf_token and generate_image_flux(scene.flux_prompt, output_path, hf_token):
         return output_path
 
-    # Step 2: Pexels API
+    # Step 2: Pollinations Flux (Free FLUX endpoint)
+    if generate_image_pollinations_flux(scene.flux_prompt, output_path):
+        return output_path
+
+    # Step 3: Pexels API
     query = f"{recipe_title} {scene.scene_name}"
     if pexels_key and generate_image_pexels(query, output_path, pexels_key):
         return output_path
 
-    # Step 3: Procedural Fallback
+    # Step 4: Procedural Fallback
     generate_image_procedural(scene, recipe_title, output_path)
     return output_path
 
@@ -826,25 +850,37 @@ def render_ken_burns_scene(
             f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
         )
 
-    # Scaling to high resolution before zoompan prevents pixel jitter
-    filter_graph = f"scale=2160:3840,{zoompan_expr},format=yuv420p"
+    # Directly feed single image to zoompan (DO NOT use -loop 1, as zoompan expands single frame to d frames)
+    filter_graph = f"{zoompan_expr},format=yuv420p"
 
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1",
-        "-t", f"{duration:.3f}",
         "-i", image_path,
         "-vf", filter_graph,
         "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "20",
+        "-preset", "veryfast",
+        "-crf", "22",
         "-pix_fmt", "yuv420p",
-        "-r", str(TARGET_FPS),
+        "-t", f"{duration:.3f}",
         output_video_path
     ]
 
     log("FFMPEG", f"Rendering Ken Burns motion for Scene {scene_number} ({duration:.2f}s)...")
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, check=True)
+    except Exception as e:
+        log("FFMPEG", f"Ken Burns zoompan encountered issue or timeout ({e}). Using ultra-fast fallback clip...")
+        cmd_fallback = [
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-i", image_path,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-t", f"{duration:.3f}",
+            output_video_path
+        ]
+        subprocess.run(cmd_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=True)
 
 
 def concatenate_scenes(scene_video_paths: List[str], output_path: str, temp_dir: str) -> None:
@@ -937,7 +973,29 @@ def assemble_final_tiktok_video(
     ]
 
     log("FFMPEG", "Executing final encode & subtitle burn-in...")
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        log("FFMPEG", "Final render timed out after 180s. Retrying without subtitle burn-in as fallback...")
+        result = subprocess.run([
+            "ffmpeg", "-y",
+            "-i", visual_video_path,
+            "-i", voiceover_path,
+            "-stream_loop", "-1",
+            "-i", bgm_path,
+            "-filter_complex", audio_filter,
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-shortest",
+            final_output_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=True)
+        return
     if result.returncode != 0:
         # Fallback if subtitle filter syntax had issue with fonts
         log("FFMPEG", f"Primary render returned non-zero ({result.stderr[:200]}). Retrying with alternate subtitle syntax...")
