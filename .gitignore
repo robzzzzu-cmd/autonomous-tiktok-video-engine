@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Temporary Generation Working Directories
+temp/
+output/*.mp4
+output/*.png
+output/*.jpg
+output/*.ass
+output/*.txt
+
+# Operating System Files
+.DS_Store
+Thumbs.db
