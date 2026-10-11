@@ -605,19 +605,26 @@ def generate_image_pollinations(
     ]
 
     for url in endpoints:
-        try:
-            resp = requests.get(url, headers=headers, timeout=35)
-            if resp.status_code == 200 and resp.content and len(resp.content) > 2000:
-                img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-                if img.size != (TARGET_WIDTH, TARGET_HEIGHT):
-                    img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
-                img.save(output_path, "PNG", quality=95)
-                log("POLLINATIONS", f"Successfully generated visual: {output_path} ({img.size[0]}x{img.size[1]})")
-                return True
-            else:
-                log("POLLINATIONS", f"Pollinations returned status {resp.status_code} (bytes: {len(resp.content) if resp.content else 0})")
-        except Exception as e:
-            log("POLLINATIONS", f"Pollinations request failed ({e})")
+        for attempt in range(2):
+            try:
+                resp = requests.get(url, headers=headers, timeout=35)
+                if resp.status_code == 200 and resp.content and len(resp.content) > 2000:
+                    img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                    if img.size != (TARGET_WIDTH, TARGET_HEIGHT):
+                        img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+                    img.save(output_path, "PNG", quality=95)
+                    log("POLLINATIONS", f"Successfully generated visual: {output_path} ({img.size[0]}x{img.size[1]})")
+                    return True
+                elif resp.status_code == 402 and not api_key and attempt == 0:
+                    log("POLLINATIONS", "Free IP rate limit cooldown active (402). Waiting 14s for cooldown reset...")
+                    time.sleep(14)
+                    continue
+                else:
+                    log("POLLINATIONS", f"Pollinations returned status {resp.status_code} (bytes: {len(resp.content) if resp.content else 0})")
+                    break
+            except Exception as e:
+                log("POLLINATIONS", f"Pollinations request failed ({e})")
+                break
 
     return False
 
@@ -756,7 +763,9 @@ def generate_scene_clip_from_pollinations(
     if not shot1_ok:
         return False
 
-    shot2_ok = fetch_shot_visual(prompt2, img2_path, gemini_key=gemini_key, pollinations_key=pollinations_api_key, hf_token=hf_token, seed=scene.scene_number * 100 + 2)
+    shot2_ok = False
+    if pollinations_api_key:
+        shot2_ok = fetch_shot_visual(prompt2, img2_path, gemini_key=gemini_key, pollinations_key=pollinations_api_key, hf_token=hf_token, seed=scene.scene_number * 100 + 2)
 
     shot1_video = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot1.mp4")
     shot2_video = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot2.mp4")
