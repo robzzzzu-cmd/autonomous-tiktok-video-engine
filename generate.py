@@ -626,6 +626,20 @@ async def synthesize_scene_audio(
     duration = get_media_duration(output_audio_path)
     if duration <= 0.0 and word_timings:
         duration = word_timings[-1].end + 0.3
+    elif duration <= 0.0:
+        duration = 7.5
+
+    # Fallback word timings if Edge-TTS did not stream WordBoundary events
+    if not word_timings and text:
+        words = text.split()
+        if words and duration > 0:
+            word_dur = duration / len(words)
+            for i, w in enumerate(words):
+                word_timings.append(WordTiming(
+                    word=w,
+                    start=i * word_dur,
+                    end=(i + 1) * word_dur
+                ))
 
     return duration, word_timings
 
@@ -884,13 +898,13 @@ def render_ken_burns_scene(
 
 
 def concatenate_scenes(scene_video_paths: List[str], output_path: str, temp_dir: str) -> None:
-    """Concatenates all individual scene video clips using ffmpeg concat demuxer."""
+    """Concatenates all individual scene video clips using ffmpeg concat demuxer with filter fallback."""
     concat_list_file = os.path.join(temp_dir, "concat_scenes.txt")
     with open(concat_list_file, "w", encoding="utf-8") as f:
         for vp in scene_video_paths:
-            # Escape path for ffmpeg concat
-            escaped_path = vp.replace("\\", "/").replace("'", "'\\''")
-            f.write(f"file '{escaped_path}'\n")
+            # Concat demuxer requires absolute path or path relative to concat_scenes.txt itself
+            abs_path = os.path.abspath(vp).replace("\\", "/")
+            f.write(f"file '{abs_path}'\n")
 
     cmd = [
         "ffmpeg", "-y",
@@ -901,7 +915,17 @@ def concatenate_scenes(scene_video_paths: List[str], output_path: str, temp_dir:
         output_path
     ]
     log("FFMPEG", f"Concatenating {len(scene_video_paths)} scene clips...")
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=40, check=True)
+    except Exception as e:
+        log("FFMPEG", f"Concat copy encountered issue ({e}). Re-encoding with filter_complex concat...")
+        inputs = []
+        for vp in scene_video_paths:
+            inputs.extend(["-i", vp])
+        n = len(scene_video_paths)
+        filter_str = "".join(f"[{i}:v]" for i in range(n)) + f"concat=n={n}:v=1:a=0[vout]"
+        cmd_filter = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", output_path]
+        subprocess.run(cmd_filter, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=True)
 
 
 def concatenate_scene_audios(scene_audio_paths: List[str], output_path: str, temp_dir: str) -> None:
@@ -909,8 +933,8 @@ def concatenate_scene_audios(scene_audio_paths: List[str], output_path: str, tem
     concat_list_file = os.path.join(temp_dir, "concat_audio.txt")
     with open(concat_list_file, "w", encoding="utf-8") as f:
         for ap in scene_audio_paths:
-            escaped_path = ap.replace("\\", "/").replace("'", "'\\''")
-            f.write(f"file '{escaped_path}'\n")
+            abs_path = os.path.abspath(ap).replace("\\", "/")
+            f.write(f"file '{abs_path}'\n")
 
     cmd = [
         "ffmpeg", "-y",
@@ -922,7 +946,17 @@ def concatenate_scene_audios(scene_audio_paths: List[str], output_path: str, tem
         output_path
     ]
     log("FFMPEG", "Concatenating scene audio tracks...")
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=True)
+    except Exception as e:
+        log("FFMPEG", f"Audio concat copy failed ({e}). Re-encoding with filter_complex concat...")
+        inputs = []
+        for ap in scene_audio_paths:
+            inputs.extend(["-i", ap])
+        n = len(scene_audio_paths)
+        filter_str = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[aout]"
+        cmd_filter = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[aout]", output_path]
+        subprocess.run(cmd_filter, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=True)
 
 
 def assemble_final_tiktok_video(
