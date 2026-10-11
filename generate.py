@@ -569,7 +569,12 @@ def build_aesthetic_food_prompt(prompt: str, recipe_title: str, scene_name: str)
         full_prompt = full_prompt[:230].rsplit(" ", 1)[0]
     return full_prompt
 
-def generate_image_pollinations(prompt: str, output_path: str, seed: Optional[int] = None) -> bool:
+def generate_image_pollinations(
+    prompt: str,
+    output_path: str,
+    seed: Optional[int] = None,
+    api_key: Optional[str] = None
+) -> bool:
     """
     Generates high-resolution 1080x1920 visuals using Pollinations.ai.
     Free, fast, and captures the exact recipe visuals without requiring API tokens.
@@ -583,15 +588,25 @@ def generate_image_pollinations(prompt: str, output_path: str, seed: Optional[in
     if seed is None:
         seed = int(time.time() * 1000) % 100000
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://pollinations.ai/",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    key_param = f"&key={api_key}" if api_key else ""
+
     endpoints = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&nologo=true&seed={seed}",
-        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&model=turbo&nologo=true&seed={seed}",
-        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&model=sana&nologo=true&seed={seed}"
+        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&nologo=true&seed={seed}{key_param}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&model=sana&nologo=true&seed={seed}{key_param}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&model=turbo&nologo=true&seed={seed}{key_param}"
     ]
 
     for url in endpoints:
         try:
-            resp = requests.get(url, timeout=35)
+            resp = requests.get(url, headers=headers, timeout=35)
             if resp.status_code == 200 and resp.content and len(resp.content) > 2000:
                 img = Image.open(io.BytesIO(resp.content)).convert("RGB")
                 if img.size != (TARGET_WIDTH, TARGET_HEIGHT):
@@ -606,25 +621,87 @@ def generate_image_pollinations(prompt: str, output_path: str, seed: Optional[in
 
     return False
 
+def generate_image_google_imagen(prompt: str, output_path: str, gemini_api_key: str) -> bool:
+    """
+    Generates high-resolution vertical 9:16 visuals using Google Imagen 3 via google-genai SDK.
+    Uses the existing GEMINI_API_KEY.
+    """
+    if not gemini_api_key:
+        return False
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=gemini_api_key)
+        log("IMAGEN", f"Generating 9:16 visual via Google Imagen 3: '{prompt[:75]}...'")
+        result = client.models.generate_images(
+            model="imagen-3.0-generate-002",
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="9:16",
+            )
+        )
+        if result and getattr(result, "generated_images", None) and len(result.generated_images) > 0:
+            img_bytes = result.generated_images[0].image.image_bytes
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            if img.size != (TARGET_WIDTH, TARGET_HEIGHT):
+                img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+            img.save(output_path, "PNG", quality=95)
+            log("IMAGEN", f"Successfully generated Imagen 3 visual: {output_path}")
+            return True
+    except Exception as e:
+        log("IMAGEN", f"Google Imagen 3 attempt encountered: {e}")
+    return False
+
+def fetch_shot_visual(
+    prompt: str,
+    output_path: str,
+    gemini_key: str = "",
+    pollinations_key: str = "",
+    hf_token: str = "",
+    seed: Optional[int] = None
+) -> bool:
+    """
+    Comprehensive multi-source visual fetcher ensuring prompt-matched food visuals:
+    1. Pollinations.ai (Fast, prompt-matched, free or authenticated)
+    2. Google Imagen 3 (via existing GEMINI_API_KEY, native 9:16 vertical)
+    3. Hugging Face Flux.1-Schnell (if HF_TOKEN is configured)
+    """
+    # 1. Pollinations
+    if generate_image_pollinations(prompt, output_path, seed=seed, api_key=pollinations_key):
+        return True
+
+    # 2. Google Imagen 3
+    if gemini_key and generate_image_google_imagen(prompt, output_path, gemini_key):
+        return True
+
+    # 3. Hugging Face Flux
+    if hf_token and generate_image_flux(prompt, output_path, hf_token):
+        return True
+
+    return False
+
 def generate_scene_clip_from_pollinations(
     scene: SceneStoryboard,
     recipe_title: str,
     output_path: str,
     target_duration: float,
     temp_dir: str,
-    pollinations_api_key: Optional[str] = None
+    gemini_key: str = "",
+    pollinations_api_key: Optional[str] = None,
+    hf_token: str = ""
 ) -> bool:
     """
-    Generates a dynamic multi-shot video clip for the scene using Pollinations.ai.
+    Generates a dynamic multi-shot video clip for the scene using Pollinations.ai & Imagen.
     Splits the scene into 2 distinct shots (Action + Macro Texture) to create
     snappy, retentive TikTok video clips that perfectly match the recipe premise.
     """
-    log("CLIP-POLLINATIONS", f"Creating dynamic video clip for Scene {scene.scene_number} ({scene.scene_name})...")
+    log("CLIP-ENGINE", f"Creating dynamic video clip for Scene {scene.scene_number} ({scene.scene_name})...")
 
     # If user provided a Pollinations API key, try the direct video endpoint first
     if pollinations_api_key:
         try:
-            log("CLIP-POLLINATIONS", "Pollinations API key detected, attempting direct video endpoint...")
+            log("CLIP-ENGINE", "Pollinations API key detected, attempting direct video endpoint...")
             v_prompt = build_aesthetic_food_prompt(scene.primary_visual_prompt or scene.flux_prompt, recipe_title, scene.scene_name)
             v_encoded = urllib.parse.quote(v_prompt[:180])
             video_url = f"https://gen.pollinations.ai/video/{v_encoded}?key={pollinations_api_key}"
@@ -643,12 +720,12 @@ def generate_scene_clip_from_pollinations(
                 subprocess.run(norm_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40, check=True)
                 if os.path.exists(raw_temp):
                     os.remove(raw_temp)
-                log("CLIP-POLLINATIONS", f"Successfully generated direct AI video clip: {output_path}")
+                log("CLIP-ENGINE", f"Successfully generated direct AI video clip: {output_path}")
                 return True
         except Exception as e_v:
-            log("CLIP-POLLINATIONS", f"Direct video endpoint attempt failed ({e_v}). Continuing with multi-shot Ken Burns engine...")
+            log("CLIP-ENGINE", f"Direct video endpoint attempt failed ({e_v}). Continuing with multi-shot Ken Burns engine...")
 
-    # Multi-shot Ken Burns dynamic clip engine (100% Free, prompt-matched, fast)
+    # Multi-shot Ken Burns dynamic clip engine (Prompt-matched, multi-angle, fast)
     motion_pairs = {
         1: ("zoom_in", "pan_down"),      # The Hook: Molten core push-in + drip tilt
         2: ("pan_down", "diagonal"),     # Base Prep: Bowl entry + ribbon whisking
@@ -675,11 +752,11 @@ def generate_scene_clip_from_pollinations(
     img1_path = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot1.png")
     img2_path = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot2.png")
 
-    shot1_ok = generate_image_pollinations(prompt1, img1_path, seed=scene.scene_number * 100 + 1)
+    shot1_ok = fetch_shot_visual(prompt1, img1_path, gemini_key=gemini_key, pollinations_key=pollinations_api_key, hf_token=hf_token, seed=scene.scene_number * 100 + 1)
     if not shot1_ok:
         return False
 
-    shot2_ok = generate_image_pollinations(prompt2, img2_path, seed=scene.scene_number * 100 + 2)
+    shot2_ok = fetch_shot_visual(prompt2, img2_path, gemini_key=gemini_key, pollinations_key=pollinations_api_key, hf_token=hf_token, seed=scene.scene_number * 100 + 2)
 
     shot1_video = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot1.mp4")
     shot2_video = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot2.mp4")
@@ -688,11 +765,11 @@ def generate_scene_clip_from_pollinations(
         render_ken_burns_shot(img1_path, dur1, motion1, shot1_video)
         render_ken_burns_shot(img2_path, dur2, motion2, shot2_video)
         concatenate_scenes([shot1_video, shot2_video], output_path, temp_dir)
-        log("CLIP-POLLINATIONS", f"Successfully produced 2-shot dynamic clip for Scene {scene.scene_number} ({target_duration:.2f}s).")
+        log("CLIP-ENGINE", f"Successfully produced 2-shot dynamic clip for Scene {scene.scene_number} ({target_duration:.2f}s).")
         return True
     elif shot1_ok:
         render_ken_burns_shot(img1_path, target_duration, motion1, output_path)
-        log("CLIP-POLLINATIONS", f"Produced single-shot dynamic clip for Scene {scene.scene_number} ({target_duration:.2f}s).")
+        log("CLIP-ENGINE", f"Produced single-shot dynamic clip for Scene {scene.scene_number} ({target_duration:.2f}s).")
         return True
 
     return False
@@ -829,24 +906,29 @@ def generate_scene_visual(
     recipe_title: str,
     output_path: str,
     hf_token: str,
-    pexels_key: str
+    pexels_key: str,
+    gemini_key: str = ""
 ) -> str:
-    """Executes visual generation waterfall: Pollinations.ai -> FLUX.1-schnell -> Pexels -> Procedural."""
-    # Step 1: Pollinations.ai (Free, prompt-matched photorealistic visual)
+    """Executes visual generation waterfall: Pollinations.ai -> Google Imagen 3 -> FLUX.1-schnell -> Pexels -> Procedural."""
+    # Step 1: Pollinations.ai (Prompt-matched photorealistic visual)
     prompt = build_aesthetic_food_prompt(scene.primary_visual_prompt or scene.flux_prompt, recipe_title, scene.scene_name)
     if generate_image_pollinations(prompt, output_path):
         return output_path
 
-    # Step 2: Hugging Face Flux.1-Schnell
+    # Step 2: Google Imagen 3 (via existing GEMINI_API_KEY)
+    if gemini_key and generate_image_google_imagen(prompt, output_path, gemini_key):
+        return output_path
+
+    # Step 3: Hugging Face Flux.1-Schnell
     if hf_token and generate_image_flux(scene.flux_prompt, output_path, hf_token):
         return output_path
 
-    # Step 3: Pexels API
+    # Step 4: Pexels API
     query = f"{recipe_title} {scene.scene_name}"
     if pexels_key and generate_image_pexels(query, output_path, pexels_key):
         return output_path
 
-    # Step 4: Procedural Fallback
+    # Step 5: Procedural Fallback
     generate_image_procedural(scene, recipe_title, output_path)
     return output_path
 
@@ -1417,7 +1499,9 @@ async def run_pipeline(
             output_path=video_filename,
             target_duration=scene.duration,
             temp_dir=temp_dir,
-            pollinations_api_key=pollinations_key
+            gemini_key=gemini_key,
+            pollinations_api_key=pollinations_key,
+            hf_token=hf_token
         )
 
         if not clip_created:
@@ -1428,7 +1512,7 @@ async def run_pipeline(
         if not clip_created:
             log("PIPELINE", f"Falling back to visual waterfall + Ken Burns motion for Scene {scene.scene_number}...")
             image_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.png")
-            generate_scene_visual(scene, project.recipe_title, image_filename, hf_token, pexels_key)
+            generate_scene_visual(scene, project.recipe_title, image_filename, hf_token, pexels_key, gemini_key=gemini_key)
             scene.image_path = image_filename
             render_ken_burns_scene(image_filename, scene.duration, scene.scene_number, video_filename)
 
