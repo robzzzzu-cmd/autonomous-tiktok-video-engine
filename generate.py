@@ -19,7 +19,7 @@ import sys
 import time
 import urllib.parse
 import wave
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -59,6 +59,7 @@ class SceneStoryboard:
     scene_name: str
     narration: str
     flux_prompt: str
+    video_search_queries: List[str] = field(default_factory=list)
     duration: float = 0.0
     image_path: str = ""
     audio_path: str = ""
@@ -223,6 +224,16 @@ def brainstorm_storyboard(
         "   - Maintain complete visual continuity: same white marble countertop with soft neutral linen cloth, "
         "     same clear fluted glass bowls, same warm brass utensils, same warm diffused natural window light, "
         "     shallow depth of field f/1.8, 35mm lens macro perspective.\n\n"
+        "4. DYNAMIC KINETIC STOCK VIDEO SEARCH QUERIES:\n"
+        "   - The video engine fetches real HD video clips matching the exact premise and culinary action of each scene.\n"
+        "   - For each scene, provide an array `video_search_queries` with 3 to 4 concise, high-yield search terms (2-4 words each)\n"
+        "     describing the exact kinetic motion and culinary action shown on screen.\n"
+        "   - Examples by scene:\n"
+        "     * Scene 1 (The Hook): Action reveal, bite, cutting with knife or fork, pulling apart (e.g. ['cutting chocolate cake', 'cake slice fork', 'gooey dessert bite']).\n"
+        "     * Scene 2 (Base Prep): Mixing/whisking ingredients in glass bowl (e.g. ['whisking batter bowl', 'mixing butter sugar', 'whisking eggs bowl']).\n"
+        "     * Scene 3 (Dough / Mix-in): Folding chunks, textures, pouring sauces (e.g. ['pouring batter pan', 'folding chocolate chips dough', 'pouring caramel sauce']).\n"
+        "     * Scene 4 (Cook / Bake): Oven rise, golden bubbling crust, baking time lapse (e.g. ['cake baking oven', 'cookies baking oven', 'bread rising oven']).\n"
+        "     * Scene 5 (Finishing & Plating): Drizzle, dusting garnish, slicing and plating (e.g. ['drizzling chocolate dessert', 'dusting powdered sugar', 'plating cake slice']).\n\n"
         "Output ONLY valid JSON with this exact schema:\n"
         "{\n"
         '  "recipe_title": "String (e.g. Brown Butter Caramel Stuffed Cookies)",\n'
@@ -233,7 +244,8 @@ def brainstorm_storyboard(
         '      "scene_number": 1,\n'
         '      "scene_name": "The Hook",\n'
         '      "narration": "Spoken voiceover for scene 1 (approx 17-19 words)",\n'
-        '      "flux_prompt": "Ultra-detailed FLUX.1-schnell image prompt"\n'
+        '      "flux_prompt": "Ultra-detailed FLUX.1-schnell image prompt",\n'
+        '      "video_search_queries": ["query 1", "query 2", "query 3"]\n'
         '    },\n'
         '    ... exactly 5 scenes\n'
         '  ]\n'
@@ -337,11 +349,15 @@ def brainstorm_storyboard(
         if AESTHETIC_STYLE_ANCHOR not in flux_prompt:
             flux_prompt = f"{flux_prompt}. {AESTHETIC_STYLE_ANCHOR}"
 
+        raw_queries = s.get("video_search_queries", [])
+        clean_queries = [str(q).strip() for q in raw_queries if str(q).strip()] if isinstance(raw_queries, list) else []
+
         scenes.append(SceneStoryboard(
             scene_number=scene_num,
             scene_name=scene_name,
             narration=narration,
-            flux_prompt=flux_prompt
+            flux_prompt=flux_prompt,
+            video_search_queries=clean_queries
         ))
 
     project = VideoProject(
@@ -545,6 +561,133 @@ def generate_image_pollinations_flux(prompt: str, output_path: str) -> bool:
             log("VISUAL-POLLINATIONS", f"Pollinations returned HTTP status {resp.status_code}")
     except Exception as e:
         log("VISUAL-POLLINATIONS", f"Pollinations generation failed ({e})")
+    return False
+
+def fetch_scene_video_clip(
+    scene: SceneStoryboard,
+    recipe_title: str,
+    output_path: str,
+    target_duration: float,
+    pexels_key: str
+) -> bool:
+    """
+    Searches Pexels Video API for authentic stock video footage matching the premise and kinetic action of the scene.
+    Downloads, normalizes, crops to 1080x1920 portrait (9:16) @ 30fps, and trims to the exact scene narration duration.
+    """
+    if not pexels_key:
+        return False
+
+    url = "https://api.pexels.com/videos/search"
+    headers = {"Authorization": pexels_key}
+
+    # Curate high-yield action fallback queries per scene archetype
+    scene_defaults = {
+        1: ["cutting cake", "cake slice fork", "dessert bite", "pastry close up", "cutting dessert"],
+        2: ["whisking batter", "mixing bowl cooking", "baking prep", "whisking eggs", "mixing dough"],
+        3: ["pouring batter", "folding dough", "pouring sauce", "chocolate chips", "pouring melted chocolate"],
+        4: ["baking oven", "cake baking oven", "bread oven", "oven cooking", "cookies baking"],
+        5: ["drizzling sauce dessert", "dusting powdered sugar", "plating dessert", "pastry presentation", "serving dessert"]
+    }
+
+    # Build search query queue: scene's custom queries first, then archetype defaults
+    candidate_queries = []
+    if scene.video_search_queries:
+        for q in scene.video_search_queries:
+            if q and q not in candidate_queries:
+                candidate_queries.append(q)
+
+    # Also add recipe title + scene action
+    recipe_keyword = recipe_title.split()[-1].lower() if recipe_title else "dessert"
+    candidate_queries.append(f"{recipe_keyword} {scene.scene_name.lower()}")
+
+    for dq in scene_defaults.get(scene.scene_number, ["baking food", "dessert"]):
+        if dq not in candidate_queries:
+            candidate_queries.append(dq)
+
+    for q in candidate_queries:
+        log("VIDEO-PEXELS", f"Searching real video clip for Scene {scene.scene_number} ({scene.scene_name}): '{q}'...")
+        try:
+            # First try portrait orientation
+            resp = requests.get(url, headers=headers, params={"query": q, "orientation": "portrait", "per_page": 8}, timeout=15)
+            videos = []
+            if resp.status_code == 200:
+                videos = resp.json().get("videos", [])
+
+            # If no portrait footage found, search across all orientations
+            if not videos:
+                resp = requests.get(url, headers=headers, params={"query": q, "per_page": 8}, timeout=15)
+                if resp.status_code == 200:
+                    videos = resp.json().get("videos", [])
+
+            if videos:
+                # Select best video with appropriate duration (prefer >= 4.0s)
+                chosen_video = videos[0]
+                for v in videos:
+                    if v.get("duration", 0) >= 4.0:
+                        chosen_video = v
+                        break
+
+                video_files = chosen_video.get("video_files", [])
+                best_file = None
+                # First priority: Vertical HD (height > width and height >= 720)
+                for vf in video_files:
+                    w, h = vf.get("width", 0), vf.get("height", 0)
+                    if h > w and h >= 720:
+                        best_file = vf
+                        break
+                # Second priority: Standard HD (width >= 1280 or quality == "hd")
+                if not best_file:
+                    for vf in video_files:
+                        if vf.get("quality") == "hd" or vf.get("width", 0) >= 1280:
+                            best_file = vf
+                            break
+                # Fallback to any file
+                if not best_file and video_files:
+                    best_file = video_files[0]
+
+                if best_file and best_file.get("link"):
+                    dl_url = best_file["link"]
+                    raw_temp = output_path.replace(".mp4", "_raw.mp4")
+                    log("VIDEO-PEXELS", f"Found stock footage (ID: {chosen_video.get('id')}). Downloading clip...")
+                    dl_resp = requests.get(dl_url, stream=True, timeout=50)
+                    if dl_resp.status_code == 200:
+                        with open(raw_temp, "wb") as f:
+                            for chunk in dl_resp.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+
+                        raw_duration = get_media_duration(raw_temp)
+                        start_offset = 1.0 if raw_duration > (target_duration + 2.0) else 0.0
+
+                        loop_flags = []
+                        if 0 < raw_duration < target_duration:
+                            loop_flags = ["-stream_loop", "-1"]
+
+                        # Normalization filter: Scale, Center-Crop to 1080x1920 9:16, 30fps
+                        filter_graph = f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,crop={TARGET_WIDTH}:{TARGET_HEIGHT},setsar=1,fps={TARGET_FPS}"
+
+                        cmd = [
+                            "ffmpeg", "-y"
+                        ] + loop_flags + [
+                            "-ss", f"{start_offset:.2f}",
+                            "-t", f"{target_duration:.3f}",
+                            "-i", raw_temp,
+                            "-vf", filter_graph,
+                            "-an",
+                            "-c:v", "libx264",
+                            "-preset", "veryfast",
+                            "-crf", "20",
+                            "-pix_fmt", "yuv420p",
+                            output_path
+                        ]
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40, check=True)
+                        if os.path.exists(raw_temp):
+                            os.remove(raw_temp)
+                        log("VIDEO-PEXELS", f"Successfully formatted dynamic video clip for Scene {scene.scene_number}: {output_path}")
+                        return True
+        except Exception as e:
+            log("VIDEO-PEXELS", f"Query '{q}' failed ({e}). Trying next query...")
+
     return False
 
 def generate_scene_visual(
@@ -1121,14 +1264,23 @@ async def run_pipeline(
             ))
         cumulative_time += scene.duration
 
-        # Generate Visual
-        image_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.png")
-        generate_scene_visual(scene, project.recipe_title, image_filename, hf_token, pexels_key)
-        scene.image_path = image_filename
-
-        # Render Ken Burns motion
+        # Generate Scene Video Clip (PRIORITIZING AUTHENTIC MOVING STOCK FOOTAGE)
         video_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.mp4")
-        render_ken_burns_scene(image_filename, scene.duration, scene.scene_number, video_filename)
+        video_clip_found = fetch_scene_video_clip(
+            scene=scene,
+            recipe_title=project.recipe_title,
+            output_path=video_filename,
+            target_duration=scene.duration,
+            pexels_key=pexels_key
+        )
+
+        if not video_clip_found:
+            log("PIPELINE", f"Real video footage not found for Scene {scene.scene_number}. Falling back to Ken Burns visual motion...")
+            image_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.png")
+            generate_scene_visual(scene, project.recipe_title, image_filename, hf_token, pexels_key)
+            scene.image_path = image_filename
+            render_ken_burns_scene(image_filename, scene.duration, scene.scene_number, video_filename)
+
         scene.video_path = video_filename
         scene_video_paths.append(video_filename)
 
@@ -1187,14 +1339,14 @@ def write_summary_report(project: VideoProject, elapsed_seconds: float, output_p
         f"- **Pipeline Execution Time**: {elapsed_seconds:.1f} seconds",
         "",
         "### 📜 Storyboard Breakdown",
-        "| Scene | Concept | Narration Script | Visual Prompt Style |",
+        "| Scene | Concept | Narration Script | Video Footage Action |",
         "|---|---|---|---|"
     ]
 
     for s in project.scenes:
         clean_narr = s.narration.replace("|", "/")
-        short_prompt = s.flux_prompt[:80].replace("|", "/") + "..."
-        lines.append(f"| **{s.scene_number}. {s.scene_name}** | {s.scene_name} | {clean_narr} | {short_prompt} |")
+        queries_str = ", ".join(f"`{q}`" for q in s.video_search_queries[:2]) if s.video_search_queries else "B-roll Footage"
+        lines.append(f"| **{s.scene_number}. {s.scene_name}** | {s.scene_name} | {clean_narr} | {queries_str} |")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
