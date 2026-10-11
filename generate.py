@@ -66,6 +66,7 @@ class SceneStoryboard:
     image_path: str = ""
     audio_path: str = ""
     video_path: str = ""
+    video_source: str = ""
 
 @dataclass
 class VideoProject:
@@ -198,10 +199,11 @@ def brainstorm_storyboard(
         f"Generate the storyboard for the specific recipe requested by the user: '{user_topic}'."
         if user_topic and user_topic.strip()
         else (
-            "AUTONOMOUSLY BRAINSTORM ONE viral, visually mesmerizing, decadent baking or comfort-food dessert/pastry. "
+            "AUTONOMOUSLY BRAINSTORM ONE viral, visually mesmerizing, decadent baking or comfort-food dessert/pastry "
+            "with rich kinetic visual actions (e.g. gooey cookie pull, glossy whisking ribbon, oven rise, chocolate drizzle). "
             "Examples of high-performing TikTok formats: stuffed NYC thick cookies with molten core, "
             "caramelized brown butter cinnamon rolls, molten lava chocolate cakes, artisan honeycomb focaccia, "
-            "cloud matcha brioche toast, burnt Basque espresso cheesecake, or flaky pull-apart brioche. "
+            "fudgy chocolate brownies, or burnt Basque espresso cheesecake. "
             f"CRITICAL: Do NOT pick or duplicate any of these previously generated recipes: [{past_titles_str}]."
         )
     )
@@ -221,16 +223,15 @@ def brainstorm_storyboard(
         "     combined MUST BE STRICTLY BETWEEN 85 AND 95 WORDS TOTAL.\n"
         "   - That is approximately 17 to 19 words per scene at conversational speed (38 to 40 seconds spoken).\n"
         "   - Count the words carefully! Less than 85 words or more than 95 words will fail validation.\n\n"
-        "3. DYNAMIC MULTI-SHOT VISUAL AESTHETIC (POLLINATIONS.AI ENGINE):\n"
-        "   - To generate lively, cinematic video clips matching the premise of the video, provide TWO distinct visual prompts per scene:\n"
-        "     * `primary_visual_prompt`: The main culinary action / state of the scene (e.g. whisking into glossy ribbon, pouring batter into fluted pan, molten center pull reveal).\n"
-        "     * `secondary_visual_prompt`: An extreme macro close-up texture or dynamic secondary angle (e.g. velvety batter cascading off whisk, bubbling caramel browning, flaky sea salt falling onto warm glaze).\n"
-        "   - Maintain complete visual continuity: same clean white Carrara marble countertop, soft neutral folded linen, "
-        "     clear fluted glass mixing bowls, warm brass utensils, warm diffused natural morning studio light, "
-        "     shallow depth of field f/1.8, 35mm macro lens perspective.\n"
+        "3. DYNAMIC KINETIC STOCK VIDEO SEARCH QUERIES:\n"
+        "   - The video engine compiles REAL, SMOOTH, CONTINUOUS MOVING VIDEO CLIPS for each scene.\n"
+        "   - For each scene, provide an array `video_search_queries` with 3 to 4 concise, high-yield "
+        "     physical action search queries suitable for stock footage databases (e.g. 'pulling apart warm cookie', "
+        "     'whisking batter glass bowl', 'pouring batter baking pan', 'cookies baking in oven timelapse', 'drizzling chocolate dessert').\n"
+        "   - Focus on concrete kinetic movement: verbs like pulling, cutting, whisking, pouring, folding, rising, drizzling.\n\n"
+        "4. AESTHETIC VISUAL PROMPTS:\n"
+        "   - Provide `primary_visual_prompt` and `secondary_visual_prompt` for aesthetic reference and fallbacks.\n"
         "   - Also include `flux_prompt` matching `primary_visual_prompt` for backward compatibility.\n\n"
-        "4. DYNAMIC KINETIC STOCK VIDEO SEARCH QUERIES:\n"
-        "   - For each scene, provide an array `video_search_queries` with 2 to 3 concise search terms.\n\n"
         "Output ONLY valid JSON with this exact schema:\n"
         "{\n"
         '  "recipe_title": "String (e.g. Brown Butter Caramel Stuffed Cookies)",\n'
@@ -244,7 +245,7 @@ def brainstorm_storyboard(
         '      "primary_visual_prompt": "Ultra-detailed macro food visual prompt of the main culinary action",\n'
         '      "secondary_visual_prompt": "Ultra-detailed extreme close-up texture detail or secondary angle",\n'
         '      "flux_prompt": "Ultra-detailed prompt for fallback",\n'
-        '      "video_search_queries": ["query 1", "query 2"]\n'
+        '      "video_search_queries": ["query 1", "query 2", "query 3"]\n'
         '    },\n'
         '    ... exactly 5 scenes\n'
         '  ]\n'
@@ -783,43 +784,134 @@ def generate_scene_clip_from_pollinations(
 
     return False
 
+def extract_culinary_keywords(recipe_title: str) -> List[str]:
+    """Extracts high-yield culinary keywords for video searches from recipe title."""
+    lower = recipe_title.lower()
+    keywords = []
+    patterns = [
+        ("cinnamon roll", "cinnamon rolls"),
+        ("cookie", "cookies"),
+        ("cheesecake", "cheesecake"),
+        ("brownie", "brownies"),
+        ("blondie", "brownies"),
+        ("focaccia", "focaccia bread"),
+        ("croissant", "croissant pastry"),
+        ("donut", "donuts"),
+        ("doughnut", "donuts"),
+        ("lava cake", "molten chocolate cake"),
+        ("cake", "cake baking"),
+        ("cupcake", "cupcakes"),
+        ("pie", "pastry pie"),
+        ("tart", "fruit tart"),
+        ("bread", "artisan bread"),
+        ("brioche", "brioche bread"),
+        ("pancake", "fluffy pancakes"),
+        ("waffle", "waffles"),
+        ("crepe", "crepes"),
+        ("tiramisu", "tiramisu dessert"),
+    ]
+    for key, kw in patterns:
+        if key in lower:
+            keywords.append(kw)
+    if not keywords:
+        keywords = ["dessert", "pastry", "baking"]
+    return keywords
+
 def fetch_scene_video_clip(
     scene: SceneStoryboard,
     recipe_title: str,
     output_path: str,
     target_duration: float,
-    pexels_key: str
+    pexels_key: str,
+    used_video_ids: Optional[set] = None
 ) -> bool:
     """
-    Searches Pexels Video API for authentic stock video footage matching the premise and kinetic action of the scene.
+    Searches Pexels Video API for authentic moving video footage matching the premise and kinetic action of the scene.
     Downloads, normalizes, crops to 1080x1920 portrait (9:16) @ 30fps, and trims to the exact scene narration duration.
+    Guarantees no duplicated video clips across the video using used_video_ids.
     """
     if not pexels_key:
+        log("VIDEO-PEXELS", "No PEXELS_API_KEY provided.")
         return False
 
     url = "https://api.pexels.com/videos/search"
     headers = {"Authorization": pexels_key}
+    food_kws = extract_culinary_keywords(recipe_title)
+    primary_kw = food_kws[0]
 
-    # Curate high-yield action fallback queries per scene archetype
+    # Archetype fallback actions (curated for high yield & kinetic motion on Pexels)
     scene_defaults = {
-        1: ["cutting cake", "cake slice fork", "dessert bite", "pastry close up", "cutting dessert"],
-        2: ["whisking batter", "mixing bowl cooking", "baking prep", "whisking eggs", "mixing dough"],
-        3: ["pouring batter", "folding dough", "pouring sauce", "chocolate chips", "pouring melted chocolate"],
-        4: ["baking oven", "cake baking oven", "bread oven", "oven cooking", "cookies baking"],
-        5: ["drizzling sauce dessert", "dusting powdered sugar", "plating dessert", "pastry presentation", "serving dessert"]
+        1: [
+            f"pulling apart {primary_kw}",
+            f"breaking {primary_kw}",
+            f"cutting {primary_kw} fork",
+            "pulling apart warm cookie",
+            "cutting cake with fork",
+            "molten chocolate lava",
+            "fresh pastry breaking",
+            "dessert bite close up",
+            "cutting dessert",
+            "cake slice fork"
+        ],
+        2: [
+            f"whisking {primary_kw} batter",
+            "whisking batter glass bowl",
+            "whisking batter bowl",
+            "mixing butter and sugar",
+            "whisking eggs bowl",
+            "creaming butter sugar",
+            "baking prep flour",
+            "mixing bowl cooking"
+        ],
+        3: [
+            f"pouring {primary_kw} batter",
+            f"folding {primary_kw} dough",
+            "pouring batter into baking pan",
+            "folding dough with spatula",
+            "pouring melted chocolate bowl",
+            "kneading bread dough",
+            "adding chocolate chips batter",
+            "pouring caramel sauce",
+            "scooping cookie dough"
+        ],
+        4: [
+            f"{primary_kw} baking in oven",
+            "cookies baking in oven",
+            "cake baking in oven timelapse",
+            "bread rising in oven",
+            "baking in oven close up",
+            "pastry baking oven",
+            "golden crust baking",
+            "baking in oven"
+        ],
+        5: [
+            f"drizzling chocolate on {primary_kw}",
+            "drizzling chocolate dessert",
+            "dusting powdered sugar pastry",
+            "drizzling caramel sauce dessert",
+            "plating dessert fine dining",
+            "serving cake slice plate",
+            "pastry presentation",
+            "dusting powdered sugar"
+        ]
     }
 
-    # Build search query queue: scene's custom queries first, then archetype defaults
-    candidate_queries = []
+    # Queue of queries to try
+    candidate_queries: List[str] = []
+
+    # 1. Gemini's custom scene queries
     if scene.video_search_queries:
         for q in scene.video_search_queries:
-            if q and q not in candidate_queries:
-                candidate_queries.append(q)
+            q_clean = str(q).strip().lower()
+            if q_clean and q_clean not in candidate_queries:
+                candidate_queries.append(q_clean)
 
-    # Also add recipe title + scene action
-    recipe_keyword = recipe_title.split()[-1].lower() if recipe_title else "dessert"
-    candidate_queries.append(f"{recipe_keyword} {scene.scene_name.lower()}")
+    # 2. Recipe keyword + scene action
+    recipe_action_query = f"{primary_kw} {scene.scene_name.lower()}"
+    if recipe_action_query not in candidate_queries:
+        candidate_queries.append(recipe_action_query)
 
+    # 3. Archetype defaults
     for dq in scene_defaults.get(scene.scene_number, ["baking food", "dessert"]):
         if dq not in candidate_queries:
             candidate_queries.append(dq)
@@ -828,85 +920,164 @@ def fetch_scene_video_clip(
         log("VIDEO-PEXELS", f"Searching real video clip for Scene {scene.scene_number} ({scene.scene_name}): '{q}'...")
         try:
             # First try portrait orientation
-            resp = requests.get(url, headers=headers, params={"query": q, "orientation": "portrait", "per_page": 8}, timeout=15)
+            resp = requests.get(
+                url,
+                headers=headers,
+                params={"query": q, "orientation": "portrait", "per_page": 10},
+                timeout=15
+            )
             videos = []
             if resp.status_code == 200:
                 videos = resp.json().get("videos", [])
+            elif resp.status_code == 429:
+                log("VIDEO-PEXELS", "Rate limited by Pexels API (429). Waiting 2s...")
+                time.sleep(2)
+                continue
 
-            # If no portrait footage found, search across all orientations
+            # If no portrait footage found, search across all orientations (center-crop will handle landscape)
             if not videos:
-                resp = requests.get(url, headers=headers, params={"query": q, "per_page": 8}, timeout=15)
+                resp = requests.get(
+                    url,
+                    headers=headers,
+                    params={"query": q, "per_page": 10},
+                    timeout=15
+                )
                 if resp.status_code == 200:
                     videos = resp.json().get("videos", [])
 
-            if videos:
-                # Select best video with appropriate duration (prefer >= 4.0s)
-                chosen_video = videos[0]
-                for v in videos:
-                    if v.get("duration", 0) >= 4.0:
-                        chosen_video = v
-                        break
+            if not videos:
+                continue
 
-                video_files = chosen_video.get("video_files", [])
-                best_file = None
-                # First priority: Vertical HD (height > width and height >= 720)
-                for vf in video_files:
+            # Filter out videos already used in previous scenes
+            available_videos = [
+                v for v in videos
+                if used_video_ids is None or v.get("id") not in used_video_ids
+            ]
+
+            if not available_videos:
+                log("VIDEO-PEXELS", f"All videos for query '{q}' were already used in earlier scenes. Trying next query...")
+                continue
+
+            # Pick the best video: prefer duration >= 3.5s
+            chosen_video = available_videos[0]
+            for v in available_videos:
+                if v.get("duration", 0) >= 3.5:
+                    chosen_video = v
+                    break
+
+            video_files = chosen_video.get("video_files", [])
+            # Priority 1: Vertical HD (height > width and height >= 720)
+            best_file = None
+            for vf in video_files:
+                if vf.get("file_type") == "video/mp4" and vf.get("link"):
                     w, h = vf.get("width", 0), vf.get("height", 0)
                     if h > w and h >= 720:
                         best_file = vf
                         break
-                # Second priority: Standard HD (width >= 1280 or quality == "hd")
-                if not best_file:
-                    for vf in video_files:
-                        if vf.get("quality") == "hd" or vf.get("width", 0) >= 1280:
+
+            # Priority 2: Landscape HD (width >= 1280 or quality in ("hd", "uhd"))
+            if not best_file:
+                for vf in video_files:
+                    if vf.get("file_type") == "video/mp4" and vf.get("link"):
+                        w = vf.get("width", 0)
+                        q_name = vf.get("quality", "")
+                        if q_name in ("hd", "uhd") or w >= 1280:
                             best_file = vf
                             break
-                # Fallback to any file
-                if not best_file and video_files:
-                    best_file = video_files[0]
 
-                if best_file and best_file.get("link"):
-                    dl_url = best_file["link"]
-                    raw_temp = output_path.replace(".mp4", "_raw.mp4")
-                    log("VIDEO-PEXELS", f"Found stock footage (ID: {chosen_video.get('id')}). Downloading clip...")
-                    dl_resp = requests.get(dl_url, stream=True, timeout=50)
-                    if dl_resp.status_code == 200:
-                        with open(raw_temp, "wb") as f:
-                            for chunk in dl_resp.iter_content(chunk_size=1024 * 1024):
-                                if chunk:
-                                    f.write(chunk)
+            # Priority 3: Any valid mp4 file with link
+            if not best_file:
+                for vf in video_files:
+                    if vf.get("file_type") == "video/mp4" and vf.get("link"):
+                        best_file = vf
+                        break
 
-                        raw_duration = get_media_duration(raw_temp)
-                        start_offset = 1.0 if raw_duration > (target_duration + 2.0) else 0.0
+            if not best_file or not best_file.get("link"):
+                continue
 
-                        loop_flags = []
-                        if 0 < raw_duration < target_duration:
-                            loop_flags = ["-stream_loop", "-1"]
+            dl_url = best_file["link"]
+            raw_temp = output_path.replace(".mp4", f"_raw_{chosen_video.get('id')}.mp4")
+            log("VIDEO-PEXELS", f"Downloading Pexels clip #{chosen_video.get('id')} ({best_file.get('width')}x{best_file.get('height')})...")
 
-                        # Normalization filter: Scale, Center-Crop to 1080x1920 9:16, 30fps
-                        filter_graph = f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,crop={TARGET_WIDTH}:{TARGET_HEIGHT},setsar=1,fps={TARGET_FPS}"
+            dl_resp = requests.get(dl_url, stream=True, timeout=50)
+            if dl_resp.status_code != 200:
+                log("VIDEO-PEXELS", f"Failed to download video file: HTTP {dl_resp.status_code}")
+                continue
 
-                        cmd = [
-                            "ffmpeg", "-y"
-                        ] + loop_flags + [
-                            "-ss", f"{start_offset:.2f}",
-                            "-t", f"{target_duration:.3f}",
-                            "-i", raw_temp,
-                            "-vf", filter_graph,
-                            "-an",
-                            "-c:v", "libx264",
-                            "-preset", "veryfast",
-                            "-crf", "20",
-                            "-pix_fmt", "yuv420p",
-                            output_path
-                        ]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40, check=True)
-                        if os.path.exists(raw_temp):
-                            os.remove(raw_temp)
-                        log("VIDEO-PEXELS", f"Successfully formatted dynamic video clip for Scene {scene.scene_number}: {output_path}")
-                        return True
+            with open(raw_temp, "wb") as f:
+                for chunk in dl_resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+            if not os.path.exists(raw_temp) or os.path.getsize(raw_temp) < 20000:
+                log("VIDEO-PEXELS", "Downloaded video file is too small or incomplete.")
+                if os.path.exists(raw_temp):
+                    os.remove(raw_temp)
+                continue
+
+            raw_duration = get_media_duration(raw_temp)
+            if raw_duration <= 0.5:
+                log("VIDEO-PEXELS", f"Invalid video duration: {raw_duration}s.")
+                if os.path.exists(raw_temp):
+                    os.remove(raw_temp)
+                continue
+
+            # Calculate smart start offset to capture peak kinetic motion
+            start_offset = 0.0
+            if raw_duration > (target_duration + 3.0):
+                start_offset = min(2.0, (raw_duration - target_duration) / 3.0)
+            elif raw_duration > (target_duration + 1.0):
+                start_offset = 0.5
+
+            # Normalization filter: Scale & center crop to 1080x1920 9:16 portrait @ 30fps
+            filter_graph = (
+                f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
+                f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},"
+                f"setsar=1,fps={TARGET_FPS}"
+            )
+
+            if raw_duration < target_duration:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-stream_loop", "-1",
+                    "-i", raw_temp,
+                    "-t", f"{target_duration:.3f}",
+                    "-vf", filter_graph,
+                    "-an",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "20",
+                    "-pix_fmt", "yuv420p",
+                    output_path
+                ]
+            else:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{start_offset:.2f}",
+                    "-i", raw_temp,
+                    "-t", f"{target_duration:.3f}",
+                    "-vf", filter_graph,
+                    "-an",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "20",
+                    "-pix_fmt", "yuv420p",
+                    output_path
+                ]
+
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40, check=True)
+
+            if os.path.exists(raw_temp):
+                os.remove(raw_temp)
+
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                if used_video_ids is not None:
+                    used_video_ids.add(chosen_video.get("id"))
+                scene.video_source = f"Pexels Video #{chosen_video.get('id')} ('{q}')"
+                log("VIDEO-PEXELS", f"Successfully compiled smooth moving clip for Scene {scene.scene_number}: {output_path} ({target_duration:.2f}s)")
+                return True
         except Exception as e:
-            log("VIDEO-PEXELS", f"Query '{q}' failed ({e}). Trying next query...")
+            log("VIDEO-PEXELS", f"Query '{q}' encountered error ({e}). Trying next query...")
 
     return False
 
@@ -1480,6 +1651,7 @@ async def run_pipeline(
     cumulative_time = 0.0
     scene_video_paths: List[str] = []
     scene_audio_paths: List[str] = []
+    used_video_ids: set = set()
 
     for idx, scene in enumerate(project.scenes):
         log("PIPELINE", f"--- Processing Scene {scene.scene_number}: {scene.scene_name} ---")
@@ -1500,30 +1672,45 @@ async def run_pipeline(
             ))
         cumulative_time += scene.duration
 
-        # Generate Dynamic Scene Video Clip via Pollinations.ai Engine
+        # Compile authentic moving video clip for Scene
         video_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.mp4")
-        clip_created = generate_scene_clip_from_pollinations(
-            scene=scene,
-            recipe_title=project.recipe_title,
-            output_path=video_filename,
-            target_duration=scene.duration,
-            temp_dir=temp_dir,
-            gemini_key=gemini_key,
-            pollinations_api_key=pollinations_key,
-            hf_token=hf_token
-        )
+        clip_created = False
 
-        if not clip_created:
-            log("PIPELINE", f"Pollinations clip generation failed for Scene {scene.scene_number}. Checking secondary fallbacks...")
-            if pexels_key and fetch_scene_video_clip(scene, project.recipe_title, video_filename, scene.duration, pexels_key):
-                clip_created = True
+        # Priority 1: Real continuous moving video footage from Pexels Video API
+        if pexels_key:
+            clip_created = fetch_scene_video_clip(
+                scene=scene,
+                recipe_title=project.recipe_title,
+                output_path=video_filename,
+                target_duration=scene.duration,
+                pexels_key=pexels_key,
+                used_video_ids=used_video_ids
+            )
 
+        # Priority 2: Direct AI Video generation (if Pollinations video key is present)
+        if not clip_created and pollinations_key:
+            log("PIPELINE", f"Pexels footage unavailable for Scene {scene.scene_number}. Attempting AI video generation...")
+            clip_created = generate_scene_clip_from_pollinations(
+                scene=scene,
+                recipe_title=project.recipe_title,
+                output_path=video_filename,
+                target_duration=scene.duration,
+                temp_dir=temp_dir,
+                gemini_key=gemini_key,
+                pollinations_api_key=pollinations_key,
+                hf_token=hf_token
+            )
+            if clip_created:
+                scene.video_source = "Pollinations Dynamic Video"
+
+        # Emergency Fallback: Ken Burns motion on photorealistic image
         if not clip_created:
-            log("PIPELINE", f"Falling back to visual waterfall + Ken Burns motion for Scene {scene.scene_number}...")
+            log("PIPELINE", f"Video clip could not be sourced for Scene {scene.scene_number}. Using Ken Burns image motion fallback...")
             image_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.png")
             generate_scene_visual(scene, project.recipe_title, image_filename, hf_token, pexels_key, gemini_key=gemini_key)
             scene.image_path = image_filename
             render_ken_burns_scene(image_filename, scene.duration, scene.scene_number, video_filename)
+            scene.video_source = "Ken Burns Image Motion Fallback"
 
         scene.video_path = video_filename
         scene_video_paths.append(video_filename)
@@ -1582,17 +1769,15 @@ def write_summary_report(project: VideoProject, elapsed_seconds: float, output_p
         f"- **Resolution & Specs**: 1080x1920 (9:16 vertical), 30 fps, H.264 / AAC",
         f"- **Pipeline Execution Time**: {elapsed_seconds:.1f} seconds",
         "",
-        "### 📜 Storyboard Breakdown",
-        "| Scene | Concept | Narration Script | Visual Shots (Pollinations.ai Engine) |",
+        "### 📜 Storyboard & Video Footage Breakdown",
+        "| Scene | Concept | Narration Script | Compiled Video Footage |",
         "|---|---|---|---|"
     ]
 
     for s in project.scenes:
         clean_narr = s.narration.replace("|", "/")
-        primary_shot = s.primary_visual_prompt.split(",")[0].replace("|", "/")
-        secondary_shot = s.secondary_visual_prompt.split(",")[0].replace("|", "/")
-        shots_desc = f"Shot 1: {primary_shot}<br>Shot 2: {secondary_shot}"
-        lines.append(f"| **{s.scene_number}. {s.scene_name}** | {s.scene_name} | {clean_narr} | {shots_desc} |")
+        source_desc = s.video_source.replace("|", "/") if s.video_source else "Moving Video Clip"
+        lines.append(f"| **{s.scene_number}. {s.scene_name}** | {s.scene_name} | {clean_narr} | {source_desc} |")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
