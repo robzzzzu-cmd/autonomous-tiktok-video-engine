@@ -58,7 +58,9 @@ class SceneStoryboard:
     scene_number: int
     scene_name: str
     narration: str
-    flux_prompt: str
+    primary_visual_prompt: str = ""
+    secondary_visual_prompt: str = ""
+    flux_prompt: str = ""
     video_search_queries: List[str] = field(default_factory=list)
     duration: float = 0.0
     image_path: str = ""
@@ -219,21 +221,16 @@ def brainstorm_storyboard(
         "     combined MUST BE STRICTLY BETWEEN 85 AND 95 WORDS TOTAL.\n"
         "   - That is approximately 17 to 19 words per scene at conversational speed (38 to 40 seconds spoken).\n"
         "   - Count the words carefully! Less than 85 words or more than 95 words will fail validation.\n\n"
-        "3. VISUAL AESTHETIC CONSISTENCY:\n"
-        "   - For each scene, craft an ultra-detailed, photorealistic prompt for FLUX.1-schnell.\n"
-        "   - Maintain complete visual continuity: same white marble countertop with soft neutral linen cloth, "
-        "     same clear fluted glass bowls, same warm brass utensils, same warm diffused natural window light, "
-        "     shallow depth of field f/1.8, 35mm lens macro perspective.\n\n"
+        "3. DYNAMIC MULTI-SHOT VISUAL AESTHETIC (POLLINATIONS.AI ENGINE):\n"
+        "   - To generate lively, cinematic video clips matching the premise of the video, provide TWO distinct visual prompts per scene:\n"
+        "     * `primary_visual_prompt`: The main culinary action / state of the scene (e.g. whisking into glossy ribbon, pouring batter into fluted pan, molten center pull reveal).\n"
+        "     * `secondary_visual_prompt`: An extreme macro close-up texture or dynamic secondary angle (e.g. velvety batter cascading off whisk, bubbling caramel browning, flaky sea salt falling onto warm glaze).\n"
+        "   - Maintain complete visual continuity: same clean white Carrara marble countertop, soft neutral folded linen, "
+        "     clear fluted glass mixing bowls, warm brass utensils, warm diffused natural morning studio light, "
+        "     shallow depth of field f/1.8, 35mm macro lens perspective.\n"
+        "   - Also include `flux_prompt` matching `primary_visual_prompt` for backward compatibility.\n\n"
         "4. DYNAMIC KINETIC STOCK VIDEO SEARCH QUERIES:\n"
-        "   - The video engine fetches real HD video clips matching the exact premise and culinary action of each scene.\n"
-        "   - For each scene, provide an array `video_search_queries` with 3 to 4 concise, high-yield search terms (2-4 words each)\n"
-        "     describing the exact kinetic motion and culinary action shown on screen.\n"
-        "   - Examples by scene:\n"
-        "     * Scene 1 (The Hook): Action reveal, bite, cutting with knife or fork, pulling apart (e.g. ['cutting chocolate cake', 'cake slice fork', 'gooey dessert bite']).\n"
-        "     * Scene 2 (Base Prep): Mixing/whisking ingredients in glass bowl (e.g. ['whisking batter bowl', 'mixing butter sugar', 'whisking eggs bowl']).\n"
-        "     * Scene 3 (Dough / Mix-in): Folding chunks, textures, pouring sauces (e.g. ['pouring batter pan', 'folding chocolate chips dough', 'pouring caramel sauce']).\n"
-        "     * Scene 4 (Cook / Bake): Oven rise, golden bubbling crust, baking time lapse (e.g. ['cake baking oven', 'cookies baking oven', 'bread rising oven']).\n"
-        "     * Scene 5 (Finishing & Plating): Drizzle, dusting garnish, slicing and plating (e.g. ['drizzling chocolate dessert', 'dusting powdered sugar', 'plating cake slice']).\n\n"
+        "   - For each scene, provide an array `video_search_queries` with 2 to 3 concise search terms.\n\n"
         "Output ONLY valid JSON with this exact schema:\n"
         "{\n"
         '  "recipe_title": "String (e.g. Brown Butter Caramel Stuffed Cookies)",\n'
@@ -244,8 +241,10 @@ def brainstorm_storyboard(
         '      "scene_number": 1,\n'
         '      "scene_name": "The Hook",\n'
         '      "narration": "Spoken voiceover for scene 1 (approx 17-19 words)",\n'
-        '      "flux_prompt": "Ultra-detailed FLUX.1-schnell image prompt",\n'
-        '      "video_search_queries": ["query 1", "query 2", "query 3"]\n'
+        '      "primary_visual_prompt": "Ultra-detailed macro food visual prompt of the main culinary action",\n'
+        '      "secondary_visual_prompt": "Ultra-detailed extreme close-up texture detail or secondary angle",\n'
+        '      "flux_prompt": "Ultra-detailed prompt for fallback",\n'
+        '      "video_search_queries": ["query 1", "query 2"]\n'
         '    },\n'
         '    ... exactly 5 scenes\n'
         '  ]\n'
@@ -343,9 +342,15 @@ def brainstorm_storyboard(
         scene_num = idx + 1
         scene_name = s.get("scene_name", f"Scene {scene_num}")
         narration = s.get("narration", "").strip()
-        flux_prompt = s.get("flux_prompt", "").strip()
+        primary_prompt = s.get("primary_visual_prompt", "").strip() or s.get("flux_prompt", "").strip()
+        secondary_prompt = s.get("secondary_visual_prompt", "").strip() or primary_prompt
+        flux_prompt = s.get("flux_prompt", "").strip() or primary_prompt
 
-        # Enforce aesthetic anchor tokens in prompt
+        # Enforce aesthetic anchor tokens in prompts
+        if AESTHETIC_STYLE_ANCHOR not in primary_prompt:
+            primary_prompt = f"{primary_prompt}. {AESTHETIC_STYLE_ANCHOR}"
+        if AESTHETIC_STYLE_ANCHOR not in secondary_prompt:
+            secondary_prompt = f"{secondary_prompt}. {AESTHETIC_STYLE_ANCHOR}"
         if AESTHETIC_STYLE_ANCHOR not in flux_prompt:
             flux_prompt = f"{flux_prompt}. {AESTHETIC_STYLE_ANCHOR}"
 
@@ -356,6 +361,8 @@ def brainstorm_storyboard(
             scene_number=scene_num,
             scene_name=scene_name,
             narration=narration,
+            primary_visual_prompt=primary_prompt,
+            secondary_visual_prompt=secondary_prompt,
             flux_prompt=flux_prompt,
             video_search_queries=clean_queries
         ))
@@ -544,23 +551,150 @@ def generate_image_procedural(scene: SceneStoryboard, recipe_title: str, output_
     img.save(output_path, "PNG")
     log("VISUAL-PROCEDURAL", f"Procedural aesthetic card saved to {output_path}")
 
-def generate_image_pollinations_flux(prompt: str, output_path: str) -> bool:
-    """Fetches high-res Flux portrait visual via Pollinations AI (free FLUX endpoint)."""
-    log("VISUAL-POLLINATIONS", "Requesting Flux visual from Pollinations...")
-    clean_prompt = urllib.parse.quote(prompt[:320])
-    url = f"https://image.pollinations.ai/prompt/{clean_prompt}?width=768&height=1344&model=flux&nologo=true&seed=42"
-    try:
-        resp = requests.get(url, timeout=40)
-        if resp.status_code == 200 and resp.content:
-            img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-            img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
-            img.save(output_path, "PNG", quality=95)
-            log("VISUAL-POLLINATIONS", f"Successfully generated Pollinations Flux image: {output_path}")
-            return True
-        else:
-            log("VISUAL-POLLINATIONS", f"Pollinations returned HTTP status {resp.status_code}")
-    except Exception as e:
-        log("VISUAL-POLLINATIONS", f"Pollinations generation failed ({e})")
+def build_aesthetic_food_prompt(prompt: str, recipe_title: str, scene_name: str) -> str:
+    """
+    Constructs an ultra-aesthetic, coherent macro food photography prompt for Pollinations.
+    Maintains complete visual continuity (white Carrara marble, warm brass utensils, warm morning studio lighting).
+    """
+    clean = prompt.replace("\n", " ").strip()
+    prefix = f"{recipe_title}: " if recipe_title.lower() not in clean.lower() else ""
+    style = (
+        "hyperrealistic 8k macro food b-roll photography, soft warm diffused morning window lighting, "
+        "shallow depth of field f/1.8, 35mm macro lens, clean white Carrara marble countertop, "
+        "warm brass utensils, folded neutral linen, cozy aesthetic, delicious golden tones, "
+        "mouthwatering, no text, no watermark, no human face"
+    )
+    full_prompt = f"{prefix}{clean}, {style}"
+    if len(full_prompt) > 230:
+        full_prompt = full_prompt[:230].rsplit(" ", 1)[0]
+    return full_prompt
+
+def generate_image_pollinations(prompt: str, output_path: str, seed: Optional[int] = None) -> bool:
+    """
+    Generates high-resolution 1080x1920 visuals using Pollinations.ai.
+    Free, fast, and captures the exact recipe visuals without requiring API tokens.
+    """
+    log("POLLINATIONS", f"Generating visual via Pollinations: '{prompt[:75]}...'")
+    clean_prompt = prompt.replace("\n", " ").strip()
+    if len(clean_prompt) > 220:
+        clean_prompt = clean_prompt[:220].rsplit(" ", 1)[0]
+
+    encoded = urllib.parse.quote(clean_prompt)
+    if seed is None:
+        seed = int(time.time() * 1000) % 100000
+
+    endpoints = [
+        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&nologo=true&seed={seed}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&model=turbo&nologo=true&seed={seed}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width={TARGET_WIDTH}&height={TARGET_HEIGHT}&model=sana&nologo=true&seed={seed}"
+    ]
+
+    for url in endpoints:
+        try:
+            resp = requests.get(url, timeout=35)
+            if resp.status_code == 200 and resp.content and len(resp.content) > 2000:
+                img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                if img.size != (TARGET_WIDTH, TARGET_HEIGHT):
+                    img = img.resize((TARGET_WIDTH, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+                img.save(output_path, "PNG", quality=95)
+                log("POLLINATIONS", f"Successfully generated visual: {output_path} ({img.size[0]}x{img.size[1]})")
+                return True
+            else:
+                log("POLLINATIONS", f"Pollinations returned status {resp.status_code} (bytes: {len(resp.content) if resp.content else 0})")
+        except Exception as e:
+            log("POLLINATIONS", f"Pollinations request failed ({e})")
+
+    return False
+
+def generate_scene_clip_from_pollinations(
+    scene: SceneStoryboard,
+    recipe_title: str,
+    output_path: str,
+    target_duration: float,
+    temp_dir: str,
+    pollinations_api_key: Optional[str] = None
+) -> bool:
+    """
+    Generates a dynamic multi-shot video clip for the scene using Pollinations.ai.
+    Splits the scene into 2 distinct shots (Action + Macro Texture) to create
+    snappy, retentive TikTok video clips that perfectly match the recipe premise.
+    """
+    log("CLIP-POLLINATIONS", f"Creating dynamic video clip for Scene {scene.scene_number} ({scene.scene_name})...")
+
+    # If user provided a Pollinations API key, try the direct video endpoint first
+    if pollinations_api_key:
+        try:
+            log("CLIP-POLLINATIONS", "Pollinations API key detected, attempting direct video endpoint...")
+            v_prompt = build_aesthetic_food_prompt(scene.primary_visual_prompt or scene.flux_prompt, recipe_title, scene.scene_name)
+            v_encoded = urllib.parse.quote(v_prompt[:180])
+            video_url = f"https://gen.pollinations.ai/video/{v_encoded}?key={pollinations_api_key}"
+            v_resp = requests.get(video_url, timeout=60)
+            if v_resp.status_code == 200 and v_resp.content and len(v_resp.content) > 10000:
+                raw_temp = output_path.replace(".mp4", "_pollinations_raw.mp4")
+                with open(raw_temp, "wb") as f:
+                    f.write(v_resp.content)
+                filter_graph = f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,crop={TARGET_WIDTH}:{TARGET_HEIGHT},setsar=1,fps={TARGET_FPS}"
+                norm_cmd = [
+                    "ffmpeg", "-y", "-i", raw_temp,
+                    "-vf", filter_graph, "-an",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                    "-t", f"{target_duration:.3f}", output_path
+                ]
+                subprocess.run(norm_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40, check=True)
+                if os.path.exists(raw_temp):
+                    os.remove(raw_temp)
+                log("CLIP-POLLINATIONS", f"Successfully generated direct AI video clip: {output_path}")
+                return True
+        except Exception as e_v:
+            log("CLIP-POLLINATIONS", f"Direct video endpoint attempt failed ({e_v}). Continuing with multi-shot Ken Burns engine...")
+
+    # Multi-shot Ken Burns dynamic clip engine (100% Free, prompt-matched, fast)
+    motion_pairs = {
+        1: ("zoom_in", "pan_down"),      # The Hook: Molten core push-in + drip tilt
+        2: ("pan_down", "diagonal"),     # Base Prep: Bowl entry + ribbon whisking
+        3: ("diagonal", "zoom_in"),      # Dough/Mix-in: Folding pan + chunk zoom
+        4: ("pan_up", "zoom_in"),        # Cook/Bake: Rising crust + golden bubble zoom
+        5: ("zoom_in", "zoom_out")       # Finishing: Drizzle push-in + plating reveal
+    }
+    motion1, motion2 = motion_pairs.get(scene.scene_number, ("zoom_in", "zoom_out"))
+
+    dur1 = round(target_duration / 2.0, 2)
+    dur2 = round(target_duration - dur1, 2)
+
+    prompt1 = build_aesthetic_food_prompt(
+        scene.primary_visual_prompt or scene.flux_prompt,
+        recipe_title,
+        scene.scene_name
+    )
+    prompt2 = build_aesthetic_food_prompt(
+        scene.secondary_visual_prompt or f"{scene.scene_name} extreme close-up texture detail",
+        recipe_title,
+        scene.scene_name
+    )
+
+    img1_path = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot1.png")
+    img2_path = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot2.png")
+
+    shot1_ok = generate_image_pollinations(prompt1, img1_path, seed=scene.scene_number * 100 + 1)
+    if not shot1_ok:
+        return False
+
+    shot2_ok = generate_image_pollinations(prompt2, img2_path, seed=scene.scene_number * 100 + 2)
+
+    shot1_video = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot1.mp4")
+    shot2_video = os.path.join(temp_dir, f"scene_{scene.scene_number}_shot2.mp4")
+
+    if shot1_ok and shot2_ok:
+        render_ken_burns_shot(img1_path, dur1, motion1, shot1_video)
+        render_ken_burns_shot(img2_path, dur2, motion2, shot2_video)
+        concatenate_scenes([shot1_video, shot2_video], output_path, temp_dir)
+        log("CLIP-POLLINATIONS", f"Successfully produced 2-shot dynamic clip for Scene {scene.scene_number} ({target_duration:.2f}s).")
+        return True
+    elif shot1_ok:
+        render_ken_burns_shot(img1_path, target_duration, motion1, output_path)
+        log("CLIP-POLLINATIONS", f"Produced single-shot dynamic clip for Scene {scene.scene_number} ({target_duration:.2f}s).")
+        return True
+
     return False
 
 def fetch_scene_video_clip(
@@ -697,13 +831,14 @@ def generate_scene_visual(
     hf_token: str,
     pexels_key: str
 ) -> str:
-    """Executes visual generation waterfall: FLUX.1-schnell -> Pollinations Flux -> Pexels -> Procedural."""
-    # Step 1: Hugging Face Flux.1-Schnell
-    if hf_token and generate_image_flux(scene.flux_prompt, output_path, hf_token):
+    """Executes visual generation waterfall: Pollinations.ai -> FLUX.1-schnell -> Pexels -> Procedural."""
+    # Step 1: Pollinations.ai (Free, prompt-matched photorealistic visual)
+    prompt = build_aesthetic_food_prompt(scene.primary_visual_prompt or scene.flux_prompt, recipe_title, scene.scene_name)
+    if generate_image_pollinations(prompt, output_path):
         return output_path
 
-    # Step 2: Pollinations Flux (Free FLUX endpoint)
-    if generate_image_pollinations_flux(scene.flux_prompt, output_path):
+    # Step 2: Hugging Face Flux.1-Schnell
+    if hf_token and generate_image_flux(scene.flux_prompt, output_path, hf_token):
         return output_path
 
     # Step 3: Pexels API
@@ -963,47 +1098,46 @@ def ensure_lofi_background_music(output_path: str) -> str:
 # CINEMATIC MOTION & FFMPEG RENDERING ENGINE
 # ==============================================================================
 
-def render_ken_burns_scene(
+def render_ken_burns_shot(
     image_path: str,
     duration: float,
-    scene_number: int,
+    motion_type: str,
     output_video_path: str
 ) -> None:
     """
-    Renders an image into a smooth Ken Burns motion video clip (1080x1920 @ 30fps)
-    using customized camera panning motions per scene.
+    Renders a single image into a smooth Ken Burns motion video clip (1080x1920 @ 30fps)
+    using specified camera panning motions.
     """
     total_frames = max(1, int(round(duration * TARGET_FPS)))
 
-    # Customized smooth pan & zoom choreography per scene
-    if scene_number == 1:
-        # Scene 1 (The Hook): Center slow macro zoom-in
+    if motion_type == "zoom_in":
+        # Slow macro push-in towards center
         zoompan_expr = (
-            f"zoompan=z='min(zoom+0.0007,1.22)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"zoompan=z='min(zoom+0.0008,1.22)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
             f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
         )
-    elif scene_number == 2:
-        # Scene 2 (Base Prep): Slow pan down into the bowl
+    elif motion_type == "pan_down":
+        # Slow downward pan into bowl / pan
         zoompan_expr = (
             f"zoompan=z='1.12':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*(on/{total_frames})':"
             f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
         )
-    elif scene_number == 3:
-        # Scene 3 (Dough / Mix-in): Subtle diagonal zoom-in
-        zoompan_expr = (
-            f"zoompan=z='min(zoom+0.0006,1.18)':x='(iw-iw/zoom)*(on/{total_frames})*0.5':y='ih/2-(ih/zoom/2)':"
-            f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
-        )
-    elif scene_number == 4:
-        # Scene 4 (Cook / Bake): Slow pan up to rising crust
+    elif motion_type == "pan_up":
+        # Slow upward pan following rising crust / browning
         zoompan_expr = (
             f"zoompan=z='1.12':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*(1-on/{total_frames})':"
             f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
         )
-    else:
-        # Scene 5 (Finishing & Plating): Elegant pull-back zoom out
+    elif motion_type == "zoom_out":
+        # Slow pull-back revealing plated dish
         zoompan_expr = (
-            f"zoompan=z='max(1.20-0.0006*on,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"zoompan=z='max(1.20-0.0007*on,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
+        )
+    else:
+        # Subtle diagonal drift
+        zoompan_expr = (
+            f"zoompan=z='min(zoom+0.0006,1.16)':x='(iw-iw/zoom)*(on/{total_frames})*0.5':y='ih/2-(ih/zoom/2)':"
             f"d={total_frames}:s={TARGET_WIDTH}x{TARGET_HEIGHT}:fps={TARGET_FPS}"
         )
 
@@ -1022,11 +1156,11 @@ def render_ken_burns_scene(
         output_video_path
     ]
 
-    log("FFMPEG", f"Rendering Ken Burns motion for Scene {scene_number} ({duration:.2f}s)...")
+    log("FFMPEG", f"Rendering Ken Burns shot '{motion_type}' ({duration:.2f}s)...")
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40, check=True)
     except Exception as e:
-        log("FFMPEG", f"Ken Burns zoompan encountered issue or timeout ({e}). Using ultra-fast fallback clip...")
+        log("FFMPEG", f"Ken Burns zoompan encountered issue ({e}). Using ultra-fast fallback clip...")
         cmd_fallback = [
             "ffmpeg", "-y",
             "-loop", "1",
@@ -1038,6 +1172,16 @@ def render_ken_burns_scene(
             output_video_path
         ]
         subprocess.run(cmd_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=True)
+
+def render_ken_burns_scene(
+    image_path: str,
+    duration: float,
+    scene_number: int,
+    output_video_path: str
+) -> None:
+    """Convenience wrapper for single-scene Ken Burns motion."""
+    motions = {1: "zoom_in", 2: "pan_down", 3: "diagonal", 4: "pan_up", 5: "zoom_out"}
+    render_ken_burns_shot(image_path, duration, motions.get(scene_number, "zoom_in"), output_video_path)
 
 
 def concatenate_scenes(scene_video_paths: List[str], output_path: str, temp_dir: str) -> None:
@@ -1222,6 +1366,7 @@ async def run_pipeline(
 
     # Resolve API keys from environment
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    pollinations_key = os.environ.get("POLLINATIONS_API_KEY", "").strip()
     hf_token = os.environ.get("HF_TOKEN", "").strip()
     pexels_key = os.environ.get("PEXELS_API_KEY", "").strip()
 
@@ -1264,18 +1409,24 @@ async def run_pipeline(
             ))
         cumulative_time += scene.duration
 
-        # Generate Scene Video Clip (PRIORITIZING AUTHENTIC MOVING STOCK FOOTAGE)
+        # Generate Dynamic Scene Video Clip via Pollinations.ai Engine
         video_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.mp4")
-        video_clip_found = fetch_scene_video_clip(
+        clip_created = generate_scene_clip_from_pollinations(
             scene=scene,
             recipe_title=project.recipe_title,
             output_path=video_filename,
             target_duration=scene.duration,
-            pexels_key=pexels_key
+            temp_dir=temp_dir,
+            pollinations_api_key=pollinations_key
         )
 
-        if not video_clip_found:
-            log("PIPELINE", f"Real video footage not found for Scene {scene.scene_number}. Falling back to Ken Burns visual motion...")
+        if not clip_created:
+            log("PIPELINE", f"Pollinations clip generation failed for Scene {scene.scene_number}. Checking secondary fallbacks...")
+            if pexels_key and fetch_scene_video_clip(scene, project.recipe_title, video_filename, scene.duration, pexels_key):
+                clip_created = True
+
+        if not clip_created:
+            log("PIPELINE", f"Falling back to visual waterfall + Ken Burns motion for Scene {scene.scene_number}...")
             image_filename = os.path.join(temp_dir, f"scene_{scene.scene_number}.png")
             generate_scene_visual(scene, project.recipe_title, image_filename, hf_token, pexels_key)
             scene.image_path = image_filename
@@ -1339,14 +1490,16 @@ def write_summary_report(project: VideoProject, elapsed_seconds: float, output_p
         f"- **Pipeline Execution Time**: {elapsed_seconds:.1f} seconds",
         "",
         "### 📜 Storyboard Breakdown",
-        "| Scene | Concept | Narration Script | Video Footage Action |",
+        "| Scene | Concept | Narration Script | Visual Shots (Pollinations.ai Engine) |",
         "|---|---|---|---|"
     ]
 
     for s in project.scenes:
         clean_narr = s.narration.replace("|", "/")
-        queries_str = ", ".join(f"`{q}`" for q in s.video_search_queries[:2]) if s.video_search_queries else "B-roll Footage"
-        lines.append(f"| **{s.scene_number}. {s.scene_name}** | {s.scene_name} | {clean_narr} | {queries_str} |")
+        primary_shot = s.primary_visual_prompt.split(",")[0].replace("|", "/")
+        secondary_shot = s.secondary_visual_prompt.split(",")[0].replace("|", "/")
+        shots_desc = f"Shot 1: {primary_shot}<br>Shot 2: {secondary_shot}"
+        lines.append(f"| **{s.scene_number}. {s.scene_name}** | {s.scene_name} | {clean_narr} | {shots_desc} |")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
